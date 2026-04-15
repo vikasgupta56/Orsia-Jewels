@@ -307,6 +307,10 @@ export default async function handler(req, res) {
   if (req.method !== 'POST')   return res.status(405).json({ error: 'Method not allowed' });
 
   try {
+    // Debug — log first 8 chars of token so we can verify it's the right one
+    const tokenPreview = (process.env.SHOPIFY_TOKEN || '').substring(0, 8);
+    console.log('SHOPIFY_STORE:', process.env.SHOPIFY_STORE);
+    console.log('SHOPIFY_TOKEN starts with:', tokenPreview);
     const { productId, productTitle, purityKt, totalCt, quality } = req.body;
 
     // ── Input validation ───────────────────────────────────────────────────
