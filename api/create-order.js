@@ -233,18 +233,21 @@ async function getGoldRates() {
 
 // ── Fetch product metafields (gold weight, diamond pcs) ──────────────────────
 async function getProductMetafields(productId) {
+  // Fetch ALL metafields — no namespace filter so we can see exactly what exists
   const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/products/${productId}/metafields.json?namespace=custom`,
+    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/products/${productId}/metafields.json`,
     {
       headers: { 'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN }
     }
   );
   const data = await res.json();
-  console.log('Raw metafields API response:', JSON.stringify(data));
+  console.log('ALL metafields:', JSON.stringify(data));
   const fields = {};
   (data.metafields || []).forEach(m => {
+    // Store by key AND by namespace.key so both lookup methods work
     fields[m.key] = m.value;
-    console.log(`Metafield: ${m.namespace}.${m.key} = ${m.value}`);
+    fields[`${m.namespace}.${m.key}`] = m.value;
+    console.log(`Found: ${m.namespace}.${m.key} = ${m.value}`);
   });
   return fields;
 }
