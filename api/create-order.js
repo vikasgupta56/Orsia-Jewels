@@ -188,6 +188,29 @@ const MAKING_CHARGE_PER_GRAM = 2500;
 const GST_RATE               = 0.03;
 const VALID_PURITIES         = [9, 14, 18];
 
+// ── Fetch fresh access token using client credentials ────────────────────────
+// shpca_ tokens expire every 24hrs so we fetch a fresh one per request
+async function getAccessToken() {
+  const res = await fetch(
+    `https://${process.env.SHOPIFY_STORE}/admin/oauth/access_token`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id:     process.env.SHOPIFY_CLIENT_ID,
+        client_secret: process.env.SHOPIFY_CLIENT_SECRET,
+        grant_type:    'client_credentials'
+      })
+    }
+  );
+  const data = await res.json();
+  if (!data.access_token) {
+    console.error('Failed to get access token:', JSON.stringify(data));
+    throw new Error('Failed to get Shopify access token');
+  }
+  return data.access_token;
+}
+
 // ── Lookup diamond price from matrix ────────────────────────────────────────
 function lookupDiamondPrice(quality, totalCt) {
   const row = DIAMOND_MATRIX.find(r =>
@@ -207,11 +230,11 @@ function getGoldWeight(base18kt, purityKt) {
 }
 
 // ── Fetch live gold rates from GPE metafield ─────────────────────────────────
-async function getGoldRates() {
+async function getGoldRates(token) {
   const res = await fetch(
     `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/metafields.json?namespace=DI-GoldPrice&key=metal_prices`,
     {
-      headers: { 'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN }
+      headers: { 'X-Shopify-Access-Token': token }
     }
   );
   const data = await res.json();
@@ -232,12 +255,12 @@ async function getGoldRates() {
 }
 
 // ── Fetch product metafields (gold weight, diamond pcs) ──────────────────────
-async function getProductMetafields(productId) {
+async function getProductMetafields(productId, token) {
   // Fetch ALL metafields — no namespace filter so we can see exactly what exists
   const res = await fetch(
     `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/products/${productId}/metafields.json`,
     {
-      headers: { 'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN }
+      headers: { 'X-Shopify-Access-Token': token }
     }
   );
   const data = await res.json();
@@ -253,7 +276,7 @@ async function getProductMetafields(productId) {
 }
 
 // ── Create Draft Order in Shopify ────────────────────────────────────────────
-async function createDraftOrder(productTitle, totalPrice, purityKt, totalCt, quality, goldWeight, diamondPcs) {
+async function createDraftOrder(productTitle, totalPrice, purityKt, totalCt, quality, goldWeight, diamondPcs, token) {
   const perDiamondCt = diamondPcs > 0
     ? (totalCt / diamondPcs).toFixed(3)
     : totalCt;
@@ -263,7 +286,7 @@ async function createDraftOrder(productTitle, totalPrice, purityKt, totalCt, qua
     {
       method: 'POST',
       headers: {
-        'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN,
+        'X-Shopify-Access-Token': token,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -307,10 +330,10 @@ export default async function handler(req, res) {
   if (req.method !== 'POST')   return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    // Debug — log first 8 chars of token so we can verify it's the right one
-    const tokenPreview = (process.env.SHOPIFY_TOKEN || '').substring(0, 8);
+    // Fetch fresh access token (shpca_ tokens expire every 24hrs)
     console.log('SHOPIFY_STORE:', process.env.SHOPIFY_STORE);
-    console.log('SHOPIFY_TOKEN starts with:', tokenPreview);
+    const token = await getAccessToken();
+    console.log('Token fetched, starts with:', token.substring(0, 8));
     const { productId, productTitle, purityKt, totalCt, quality } = req.body;
 
     // ── Input validation ───────────────────────────────────────────────────
@@ -332,7 +355,7 @@ export default async function handler(req, res) {
     }
 
     // ── Get product data from Shopify ──────────────────────────────────────
-    const meta         = await getProductMetafields(productId);
+    const meta         = await getProductMetafields(productId, token);
     console.log('Orsia metafields:', JSON.stringify(meta));
 
     const base18kt     = parseFloat(meta.gold_weight_18kt || 0);
@@ -347,7 +370,7 @@ export default async function handler(req, res) {
     }
 
     // ── Get live gold rates from GPE ───────────────────────────────────────
-    const goldRates    = await getGoldRates();
+    const goldRates    = await getGoldRates(token);
     const goldWt       = getGoldWeight(base18kt, purityInt);
     const goldRate     = goldRates[purityInt];
 
@@ -371,7 +394,8 @@ export default async function handler(req, res) {
       ctFloat,
       quality,
       goldWt,
-      diamondPcs
+      diamondPcs,
+      token
     );
 
     if (!orderData.draft_order) {
