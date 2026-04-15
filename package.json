@@ -4,6 +4,6 @@
   "description": "Secure price calculator and draft order creator for Orsia Jewels",
   "private": true,
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   }
 }
