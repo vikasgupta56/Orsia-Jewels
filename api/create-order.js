@@ -209,7 +209,7 @@ function getGoldWeight(base18kt, purityKt) {
 // ── Fetch live gold rates from GPE metafield ─────────────────────────────────
 async function getGoldRates() {
   const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2024-01/metafields.json?namespace=DI-GoldPrice&key=metal_prices`,
+    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/metafields.json?namespace=DI-GoldPrice&key=metal_prices`,
     {
       headers: { 'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN }
     }
@@ -234,14 +234,18 @@ async function getGoldRates() {
 // ── Fetch product metafields (gold weight, diamond pcs) ──────────────────────
 async function getProductMetafields(productId) {
   const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2024-01/products/${productId}/metafields.json?namespace=custom`,
+    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/products/${productId}/metafields.json?namespace=custom`,
     {
       headers: { 'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN }
     }
   );
   const data = await res.json();
+  console.log('Raw metafields API response:', JSON.stringify(data));
   const fields = {};
-  (data.metafields || []).forEach(m => { fields[m.key] = m.value; });
+  (data.metafields || []).forEach(m => {
+    fields[m.key] = m.value;
+    console.log(`Metafield: ${m.namespace}.${m.key} = ${m.value}`);
+  });
   return fields;
 }
 
@@ -252,7 +256,7 @@ async function createDraftOrder(productTitle, totalPrice, purityKt, totalCt, qua
     : totalCt;
 
   const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2024-01/draft_orders.json`,
+    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/draft_orders.json`,
     {
       method: 'POST',
       headers: {
@@ -289,8 +293,9 @@ async function createDraftOrder(productTitle, totalPrice, purityKt, totalCt, qua
 // ── Main handler ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
 
-  // CORS — allow requests from your Shopify store only
-  const allowedOrigin = `https://${process.env.SHOPIFY_STORE_DOMAIN}`;
+  // CORS — strip any accidental https:// from env var before building origin
+  const rawDomain     = (process.env.SHOPIFY_STORE_DOMAIN || '').replace(/^https?:\/\//, '');
+  const allowedOrigin = `https://${rawDomain}`;
   res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -321,11 +326,17 @@ export default async function handler(req, res) {
 
     // ── Get product data from Shopify ──────────────────────────────────────
     const meta         = await getProductMetafields(productId);
+    console.log('Orsia metafields:', JSON.stringify(meta));
+
     const base18kt     = parseFloat(meta.gold_weight_18kt || 0);
     const diamondPcs   = parseInt(meta.diamond_pcs || 1, 10);
 
     if (!base18kt) {
-      return res.status(400).json({ error: 'Product gold weight not configured in admin' });
+      return res.status(400).json({
+        error: 'Product gold weight not configured in admin',
+        debug_keys: Object.keys(meta),
+        debug_meta: meta
+      });
     }
 
     // ── Get live gold rates from GPE ───────────────────────────────────────
