@@ -37,6 +37,17 @@ async function getGoldRates(token) {
   const data = await res.json();
   let prices = {};
   try { prices = JSON.parse(data.metafields[0]?.value || '{}'); } catch(e) {}
+
+  // Derive all karat rates from 24K spot price (most reliable GPE field)
+  const rate24k = parseFloat(prices.gold_price_24k) || 0;
+  if (rate24k > 100) {
+    return {
+      18: Math.round(rate24k * 0.750),
+      14: Math.round(rate24k * 0.585),
+      9:  Math.round(rate24k * 0.375)
+    };
+  }
+  // Fallback to individual fields or hardcoded defaults
   return {
     18: parseFloat(prices.gold_price_18k) || 4736,
     14: parseFloat(prices.gold_price_14k) || 3520,
@@ -77,15 +88,17 @@ async function getDiamondMatrix(diamondType, token) {
   });
 }
 
-// Formula: matrix_rate(quality, per_diamond_ct) × per_diamond_ct × count
+// Formula: SolRate/SideRate × totalWt
+// n/N used only to find per-diamond CT for matrix lookup
+// Final price = rate from matrix × total weight (not × count)
 function calcDiamondGroupPrice(matrix, quality, totalWt, count) {
-  if (!count || count === 0 || !totalWt) return 0;
-  const perCt = totalWt / count;
+  if (!totalWt) return 0;
+  const perCt = count > 0 ? totalWt / count : totalWt;
   const row = matrix.find(r =>
     r.quality === quality && perCt >= r.ctMin && perCt <= r.ctMax
   );
   if (!row) return 0;
-  return row.price * perCt * count;
+  return row.price * totalWt;
 }
 
 export default async function handler(req, res) {
