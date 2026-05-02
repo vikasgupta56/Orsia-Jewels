@@ -29,30 +29,43 @@ async function getAccessToken() {
   return data.access_token;
 }
 
-async function getGoldRates(token) {
-  const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/metafields.json?namespace=DI-GoldPrice&key=metal_prices`,
-    { headers: { 'X-Shopify-Access-Token': token } }
-  );
-  const data = await res.json();
-  let prices = {};
-  try { prices = JSON.parse(data.metafields[0]?.value || '{}'); } catch(e) {}
+// ── Live gold rate fetch — no app dependency ─────────────────────────────
+// Uses metals.live (free, no key) + currency conversion
+// Falls back to hardcoded defaults if API is unavailable
+async function getGoldRates() {
+  try {
+    // Step 1: Get gold spot price in USD per troy oz
+    const metalRes = await fetch('https://api.metals.live/v1/spot/gold', {
+      headers: { 'Accept': 'application/json' }
+    });
+    const metalData = await metalRes.json();
+    const usdPerOz  = metalData[0]?.price;
+    if (!usdPerOz || usdPerOz <= 0) throw new Error('Invalid gold price');
 
-  // Derive all karat rates from 24K spot price (most reliable GPE field)
-  const rate24k = parseFloat(prices.gold_price_24k) || 0;
-  if (rate24k > 100) {
-    return {
-      18: Math.round(rate24k * 0.750),
-      14: Math.round(rate24k * 0.585),
-      9:  Math.round(rate24k * 0.375)
+    // Step 2: Get USD → INR exchange rate
+    const fxRes  = await fetch('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json');
+    const fxData = await fxRes.json();
+    const inrRate = fxData?.usd?.inr;
+    if (!inrRate || inrRate <= 0) throw new Error('Invalid exchange rate');
+
+    // Step 3: Derive per-gram rates for each karat
+    // 1 troy oz = 31.1035 grams
+    const per24ktGram = (usdPerOz * inrRate) / 31.1035;
+
+    const rates = {
+      18: Math.round(per24ktGram * 0.750),  // 18/24
+      14: Math.round(per24ktGram * 0.585),  // 14/24
+      9:  Math.round(per24ktGram * 0.375)   // 9/24
     };
+
+    console.log('Live gold rates fetched:', rates, '| USD/oz:', usdPerOz, '| INR/USD:', inrRate);
+    return rates;
+
+  } catch(err) {
+    console.warn('Gold rate fetch failed, using fallback:', err.message);
+    // Fallback — update these periodically as a safety net
+    return { 18: 5400, 14: 4200, 9: 2700 };
   }
-  // Fallback to individual fields or hardcoded defaults
-  return {
-    18: parseFloat(prices.gold_price_18k) || 4736,
-    14: parseFloat(prices.gold_price_14k) || 3520,
-    9:  parseFloat(prices.gold_price_9k)  || 2800
-  };
 }
 
 async function getProductMetafields(productId, token) {
@@ -148,7 +161,7 @@ export default async function handler(req, res) {
     const sideWtFloat = parseFloat(sideWt) || 0;
     const totalCt     = +(solWtFloat + sideWtFloat).toFixed(3);
 
-    const goldRates = await getGoldRates(token);
+    const goldRates = await getGoldRates();
     const goldWt    = getGoldWeight(base18kt, purityInt);
     const goldPrice = goldWt * goldRates[purityInt];
 

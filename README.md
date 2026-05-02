@@ -107,6 +107,3 @@ and change the value. Then redeploy.
 - Shopify token never exposed to browser
 - CORS restricted to your store domain only
 - All inputs validated before processing
-
-
-All good. Let's do it!!!
