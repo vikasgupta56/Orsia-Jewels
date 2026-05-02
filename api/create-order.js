@@ -29,42 +29,21 @@ async function getAccessToken() {
   return data.access_token;
 }
 
-// ── Live gold rate fetch — no app dependency ─────────────────────────────
-// Uses metals.live (free, no key) + currency conversion
-// Falls back to hardcoded defaults if API is unavailable
+// ── Live gold rate fetch — INR directly from goldpricez ──────────────────
 async function getGoldRates() {
   try {
-    // Step 1: Get gold spot price in USD per troy oz
-    const metalRes = await fetch('https://api.metals.live/v1/spot/gold', {
+    const res = await fetch('https://orsia-jewels.vercel.app/api/gold-rates', {
       headers: { 'Accept': 'application/json' }
     });
-    const metalData = await metalRes.json();
-    const usdPerOz  = metalData[0]?.price;
-    if (!usdPerOz || usdPerOz <= 0) throw new Error('Invalid gold price');
-
-    // Step 2: Get USD → INR exchange rate
-    const fxRes  = await fetch('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json');
-    const fxData = await fxRes.json();
-    const inrRate = fxData?.usd?.inr;
-    if (!inrRate || inrRate <= 0) throw new Error('Invalid exchange rate');
-
-    // Step 3: Derive per-gram rates for each karat
-    // 1 troy oz = 31.1035 grams
-    const per24ktGram = (usdPerOz * inrRate) / 31.1035;
-
-    const rates = {
-      18: Math.round(per24ktGram * 0.750),  // 18/24
-      14: Math.round(per24ktGram * 0.585),  // 14/24
-      9:  Math.round(per24ktGram * 0.375)   // 9/24
-    };
-
-    console.log('Live gold rates fetched:', rates, '| USD/oz:', usdPerOz, '| INR/USD:', inrRate);
-    return rates;
-
+    const data = await res.json();
+    if (data.rate18k && data.rate18k > 1000) {
+      console.log('Gold rates from proxy:', data);
+      return { 18: data.rate18k, 14: data.rate14k, 9: data.rate9k };
+    }
+    throw new Error('Invalid rates from proxy');
   } catch(err) {
-    console.warn('Gold rate fetch failed, using fallback:', err.message);
-    // Fallback — update these periodically as a safety net
-    return { 18: 5400, 14: 4200, 9: 2700 };
+    console.warn('Gold rate proxy failed:', err.message);
+    return { 18: 10454, 14: 8144, 9: 5229 };
   }
 }
 
