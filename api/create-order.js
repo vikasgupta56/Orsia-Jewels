@@ -115,7 +115,8 @@ export default async function handler(req, res) {
     const {
       productId, productTitle,
       purityKt, quality, diamondType,
-      solWt, sideWt
+      solWt, sideWt,
+      shape
     } = req.body;
 
     if (!productId || !productTitle || !purityKt || !quality || !diamondType) {
@@ -183,7 +184,8 @@ export default async function handler(req, res) {
                 { name: 'Solitaire Count',     value: solCount + ' pcs'            },
                 { name: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
                 { name: 'Side Diamond Count',  value: sideCount + ' pcs'           },
-                { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           }
+                { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
+                { name: 'Diamond Shape',        value: shape || 'Not specified'       }
               ]
             }],
             note: `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`
