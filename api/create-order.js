@@ -108,7 +108,7 @@ export default async function handler(req, res) {
       productId, productTitle,
       purityKt, quality, diamondType,
       solWt, sideWt,
-      shape, certType
+      shape, certType, engravingText
     } = req.body;
 
     if (!productId || !productTitle || !purityKt || !quality || !diamondType) {
@@ -179,7 +179,8 @@ export default async function handler(req, res) {
                 { name: 'Side Diamond Count',  value: sideCount + ' pcs'           },
                 { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
                 { name: 'Diamond Shape',        value: shape || 'Not specified'       },
-                ...(certType ? [{ name: 'Certificate', value: certType }] : [])
+                ...(certType ? [{ name: 'Certificate', value: certType }] : []),
+              ...(engravingText ? [{ name: 'Engraving Text', value: engravingText }] : [])
               ]
             }],
             note: `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`
