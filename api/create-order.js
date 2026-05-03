@@ -108,7 +108,7 @@ export default async function handler(req, res) {
       productId, productTitle,
       purityKt, quality, diamondType,
       solWt, sideWt,
-      shape
+      shape, certType
     } = req.body;
 
     if (!productId || !productTitle || !purityKt || !quality || !diamondType) {
@@ -151,7 +151,8 @@ export default async function handler(req, res) {
     const making   = MAKING_CHARGE_PER_GRAM * goldWt;
     const subtotal = goldPrice + solPrice + sidePrice + making;
     const gst      = subtotal * GST_RATE;
-    const total    = Math.round(subtotal + gst);
+    const certPrice = certType ? 1000 : 0;
+    const total    = Math.round(subtotal + gst) + certPrice;
 
     console.log('Price calc:', { goldPrice, solPrice, sidePrice, making, gst, total });
 
@@ -177,7 +178,8 @@ export default async function handler(req, res) {
                 { name: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
                 { name: 'Side Diamond Count',  value: sideCount + ' pcs'           },
                 { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
-                { name: 'Diamond Shape',        value: shape || 'Not specified'       }
+                { name: 'Diamond Shape',        value: shape || 'Not specified'       },
+                ...(certType ? [{ name: 'Certificate', value: certType }] : [])
               ]
             }],
             note: `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`
