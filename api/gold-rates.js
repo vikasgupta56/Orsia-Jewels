@@ -1,9 +1,16 @@
 // Orsia Jewels — Gold Rate Proxy
-// GPE Advanced stores per-gram INR rates directly — read as-is
+// Reads 24K rate from GPE, derives karat rates at: 18k=79%, 14k=62%, 9k=40%
 
 let cachedRates = null;
 let cacheTime   = 0;
 const CACHE_TTL = 5 * 60 * 1000;
+
+// Karat factors applied to 24K rate
+const KARAT_FACTORS = { 18: 0.79, 14: 0.62, 9: 0.40 };
+
+// Fallback 24K rate (~₹14,329/g as of mid-2025). Derived lower-karat fallbacks
+// are auto-computed from this using the same factors.
+const FALLBACK_24K = 14329;
 
 async function getAccessToken() {
   const res = await fetch(
@@ -53,30 +60,49 @@ export default async function handler(req, res) {
     let prices = {};
     try { prices = JSON.parse(raw.value); } catch(e) { throw new Error('Could not parse GPE value'); }
 
-    // GPE Advanced stores INR per gram directly — read as-is
-    const rate18k = parseFloat(prices.gold_price_18k);
-    const rate14k = parseFloat(prices.gold_price_14k);
-    const rate9k  = parseFloat(prices.gold_price_9k);
+    // ── Resolve the 24K rate ──────────────────────────────────────────────────
+    // GPE Advanced may store gold_price_24k directly. If not, derive from
+    // gold_price_18k using the inverse of our 79% factor (÷ 0.79).
+    let rate24k = parseFloat(prices.gold_price_24k);
 
-    if (!rate18k || rate18k < 1000) throw new Error('Invalid 18k rate: ' + rate18k);
+    if (!rate24k || rate24k < 1000) {
+      const stored18k = parseFloat(prices.gold_price_18k);
+      if (stored18k && stored18k > 1000) {
+        // Back-derive: if GPE 18k was set assuming 75% purity (standard hallmark),
+        // we resolve the 24K base and re-apply our own 79% factor downstream.
+        rate24k = stored18k / KARAT_FACTORS[18];
+        console.log('Derived 24K from GPE 18K:', stored18k, '→', rate24k);
+      } else {
+        throw new Error('No valid 24K or 18K rate found in GPE: ' + JSON.stringify({ gold_price_24k: prices.gold_price_24k, gold_price_18k: prices.gold_price_18k }));
+      }
+    }
+
+    // ── Derive lower-karat rates ──────────────────────────────────────────────
+    const rate18k = Math.round(rate24k * KARAT_FACTORS[18]);  // 79% of 24K
+    const rate14k = Math.round(rate24k * KARAT_FACTORS[14]);  // 62% of 24K
+    const rate9k  = Math.round(rate24k * KARAT_FACTORS[9]);   // 40% of 24K
 
     cachedRates = {
-      rate18k:   Math.round(rate18k),
-      rate14k:   Math.round(rate14k),
-      rate9k:    Math.round(rate9k),
+      rate24k:   Math.round(rate24k),
+      rate18k,
+      rate14k,
+      rate9k,
       fetchedAt: new Date().toISOString()
     };
     cacheTime = Date.now();
 
-    console.log('Gold rates from GPE:', cachedRates);
+    console.log('Gold rates (24K base):', cachedRates);
     return res.status(200).json({ ...cachedRates, cached: false });
 
   } catch(err) {
     console.warn('GPE fetch failed:', err.message);
+
+    // Fallback: derive all rates from the hardcoded 24K base
     return res.status(200).json({
-      rate18k:  11320,
-      rate14k:  8804,
-      rate9k:   5660,
+      rate24k:  FALLBACK_24K,
+      rate18k:  Math.round(FALLBACK_24K * KARAT_FACTORS[18]),  // 11,320
+      rate14k:  Math.round(FALLBACK_24K * KARAT_FACTORS[14]),  //  8,884
+      rate9k:   Math.round(FALLBACK_24K * KARAT_FACTORS[9]),   //  5,732
       cached:   false,
       fallback: true,
       error:    err.message
