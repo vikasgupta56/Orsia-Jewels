@@ -4,11 +4,15 @@ const MAKING_CHARGE_PER_GRAM = 2500;
 const GST_RATE               = 0.03;
 const VALID_PURITIES         = [9, 14, 18];
 
-function getGoldWeight(base18kt, purityKt) {
-  if (purityKt === 18) return base18kt;
-  if (purityKt === 14) return +(base18kt * 0.90).toFixed(3);
-  if (purityKt === 9)  return +(base18kt * 0.80).toFixed(3);
-  return base18kt;
+// Karat factors — same as front-end and gold-rates.js
+const KARAT_WEIGHT_FACTOR = { 18: 0.79, 14: 0.62, 9: 0.40 };
+const KARAT_RATE_FACTOR   = { 18: 0.79, 14: 0.62, 9: 0.40 };
+const FALLBACK_24K        = 14329;
+
+// base24k = the 24K gold weight for this CT option (from product metafield array)
+function getGoldWeight(base24k, purityKt) {
+  const factor = KARAT_WEIGHT_FACTOR[purityKt] || KARAT_WEIGHT_FACTOR[18];
+  return +(base24k * factor).toFixed(3);
 }
 
 async function getAccessToken() {
@@ -29,21 +33,32 @@ async function getAccessToken() {
   return data.access_token;
 }
 
-// ── Live gold rate fetch — INR directly from goldpricez ──────────────────
+// ── Live gold rate fetch — returns { rate24k, rate18k, rate14k, rate9k } ──────
 async function getGoldRates() {
   try {
     const res = await fetch('https://orsia-jewels.vercel.app/api/gold-rates', {
       headers: { 'Accept': 'application/json' }
     });
     const data = await res.json();
-    if (data.rate18k && data.rate18k > 1000) {
+    if (data.rate24k && data.rate24k > 1000) {
       console.log('Gold rates from proxy:', data);
-      return { 18: data.rate18k, 14: data.rate14k, 9: data.rate9k };
+      return {
+        rate24k: data.rate24k,
+        18:      data.rate18k,
+        14:      data.rate14k,
+        9:       data.rate9k
+      };
     }
     throw new Error('Invalid rates from proxy');
   } catch(err) {
     console.warn('Gold rate proxy failed:', err.message);
-    return { 18: 10454, 14: 8144, 9: 5229 };
+    // Fallback: derive from hardcoded 24K base
+    return {
+      rate24k: FALLBACK_24K,
+      18:  Math.round(FALLBACK_24K * KARAT_RATE_FACTOR[18]),
+      14:  Math.round(FALLBACK_24K * KARAT_RATE_FACTOR[14]),
+      9:   Math.round(FALLBACK_24K * KARAT_RATE_FACTOR[9])
+    };
   }
 }
 
@@ -80,9 +95,6 @@ async function getDiamondMatrix(diamondType, token) {
   });
 }
 
-// Formula: SolRate/SideRate × totalWt
-// n/N used only to find per-diamond CT for matrix lookup
-// Final price = rate from matrix × total weight (not × count)
 function calcDiamondGroupPrice(matrix, quality, totalWt, count) {
   if (!totalWt) return 0;
   const perCt = count > 0 ? totalWt / count : totalWt;
@@ -108,6 +120,7 @@ export default async function handler(req, res) {
       productId, productTitle,
       purityKt, quality, diamondType,
       solWt, sideWt,
+      ctIndex,                  // ← index of selected CT option (0-based), sent by front-end
       shape, certType, engravingText
     } = req.body;
 
@@ -122,27 +135,50 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Invalid diamond type' });
     }
 
+    const ctIdx = parseInt(ctIndex, 10) || 0;
+
     console.log('SHOPIFY_STORE:', process.env.SHOPIFY_STORE);
     const token = await getAccessToken();
 
-    const meta         = await getProductMetafields(productId, token);
+    const meta = await getProductMetafields(productId, token);
     console.log('ALL metafields:', JSON.stringify(meta));
 
-    const base18kt   = parseFloat(meta.gold_weight_18kt   || meta['custom.gold_weight_18kt']   || 0);
-    const solCount   = parseInt( meta.solitaire_count     || meta['custom.solitaire_count']     || 0, 10);
-    const sideCount  = parseInt( meta.side_count          || meta['custom.side_count']          || 0, 10);
+    // ── Read the 24K gold weight options list ──────────────────────────────
+    // Metafield: custom.gold_weight_24kt_options  (type: list.number_decimal)
+    // Values are 24K gross weights in grams, one per solitaire_ct_options entry.
+    const goldWt24kOptionsRaw = meta.gold_weight_24kt_options
+      || meta['custom.gold_weight_24kt_options']
+      || '[]';
 
-    if (!base18kt) {
-      return res.status(400).json({ error: 'Product gold weight not configured', debug_keys: Object.keys(meta) });
+    let goldWt24kOptions = [];
+    try {
+      goldWt24kOptions = JSON.parse(goldWt24kOptionsRaw);
+    } catch(e) {
+      // If it's a plain number (single-value metafield), treat as fallback
+      const n = parseFloat(goldWt24kOptionsRaw);
+      if (n > 0) goldWt24kOptions = [n];
     }
+
+    const base24k = parseFloat(goldWt24kOptions[ctIdx]) || 0;
+
+    if (!base24k) {
+      return res.status(400).json({
+        error: 'Gold weight not configured for this CT option',
+        debug: { ctIdx, goldWt24kOptions, debug_keys: Object.keys(meta) }
+      });
+    }
+
+    const solCount  = parseInt(meta.solitaire_count  || meta['custom.solitaire_count']  || 0, 10);
+    const sideCount = parseInt(meta.side_count        || meta['custom.side_count']        || 0, 10);
 
     const solWtFloat  = parseFloat(solWt)  || 0;
     const sideWtFloat = parseFloat(sideWt) || 0;
     const totalCt     = +(solWtFloat + sideWtFloat).toFixed(3);
 
+    // ── Gold weight and rate for the selected purity ───────────────────────
     const goldRates = await getGoldRates();
-    const goldWt    = getGoldWeight(base18kt, purityInt);
-    const goldPrice = goldWt * goldRates[purityInt];
+    const goldWt    = getGoldWeight(base24k, purityInt);   // applies karat %
+    const goldPrice = goldWt * goldRates[purityInt];       // rate already karat-adjusted
 
     const matrix    = await getDiamondMatrix(diamondType, token);
     const solPrice  = calcDiamondGroupPrice(matrix, quality, solWtFloat,  solCount);
@@ -154,7 +190,10 @@ export default async function handler(req, res) {
     const certPrice = certType ? 1000 : 0;
     const total    = Math.round(subtotal + gst) + certPrice;
 
-    console.log('Price calc:', { goldPrice, solPrice, sidePrice, making, gst, total });
+    console.log('Price calc:', {
+      base24k, goldWt, goldRate: goldRates[purityInt],
+      goldPrice, solPrice, sidePrice, making, gst, total
+    });
 
     const orderRes = await fetch(
       `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/draft_orders.json`,
@@ -170,7 +209,8 @@ export default async function handler(req, res) {
               requires_shipping: true,
               properties: [
                 { name: 'Gold Purity',         value: purityInt + 'kt'              },
-                { name: 'Gold Weight',         value: goldWt.toFixed(2) + 'g'      },
+                { name: 'Gold Weight (24K)',    value: base24k.toFixed(3) + 'g'     },
+                { name: 'Gold Weight (actual)', value: goldWt.toFixed(3) + 'g'      },
                 { name: 'Diamond Type',        value: diamondType                   },
                 { name: 'Diamond Quality',     value: quality                       },
                 { name: 'Total CT',            value: totalCt + 'ct'               },
@@ -178,9 +218,9 @@ export default async function handler(req, res) {
                 { name: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
                 { name: 'Side Diamond Count',  value: sideCount + ' pcs'           },
                 { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
-                { name: 'Diamond Shape',        value: shape || 'Not specified'       },
-                ...(certType ? [{ name: 'Certificate', value: certType }] : []),
-              ...(engravingText ? [{ name: 'Engraving Text', value: engravingText }] : [])
+                { name: 'Diamond Shape',       value: shape || 'Not specified'      },
+                ...(certType     ? [{ name: 'Certificate',    value: certType      }] : []),
+                ...(engravingText ? [{ name: 'Engraving Text', value: engravingText }] : [])
               ]
             }],
             note: `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`
@@ -198,11 +238,14 @@ export default async function handler(req, res) {
       checkoutUrl:     orderData.draft_order.invoice_url,
       calculatedPrice: total,
       breakdown: {
-        goldPrice:  Math.round(goldPrice),
-        solPrice:   Math.round(solPrice),
-        sidePrice:  Math.round(sidePrice),
-        making:     Math.round(making),
-        gst:        Math.round(gst),
+        goldWeight24k: base24k,
+        goldWeightActual: goldWt,
+        goldRate:      goldRates[purityInt],
+        goldPrice:     Math.round(goldPrice),
+        solPrice:      Math.round(solPrice),
+        sidePrice:     Math.round(sidePrice),
+        making:        Math.round(making),
+        gst:           Math.round(gst),
         total
       }
     });
