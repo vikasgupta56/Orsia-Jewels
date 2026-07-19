@@ -108,10 +108,10 @@ export default async function handler(req, res) {
   try {
     const {
       productId, productTitle,
-      purityKt, quality, diamondType,
+      purityKt, metalLabel, quality, diamondType,
       solWt, sideWt,
       ctIndex,                  // ← index of selected CT option (0-based), sent by front-end
-      shape, certType, engravingText
+      shape, ringSize, certType, engravingText
     } = req.body;
 
     if (!productId || !productTitle || !purityKt || !quality || !diamondType) {
@@ -199,6 +199,7 @@ export default async function handler(req, res) {
               requires_shipping: true,
               properties: [
                 { name: 'Gold Purity',         value: purityInt + 'kt'              },
+                { name: 'Metal Color',         value: metalLabel || (purityInt + 'kt') },
                 { name: 'Gold Weight (18K input)', value: base18k.toFixed(3) + 'g'     },
                 { name: 'Gold Weight (actual)',    value: goldWt.toFixed(3) + 'g'      },
                 { name: 'Diamond Type',        value: diamondType                   },
@@ -209,6 +210,7 @@ export default async function handler(req, res) {
                 { name: 'Side Diamond Count',  value: sideCount + ' pcs'           },
                 { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
                 { name: 'Diamond Shape',       value: shape || 'Not specified'      },
+                { name: 'Ring Size',           value: ringSize || 'Not specified'   },
                 ...(certType     ? [{ name: 'Certificate',    value: certType      }] : []),
                 ...(engravingText ? [{ name: 'Engraving Text', value: engravingText }] : [])
               ]
