@@ -1,7 +1,6 @@
 // Orsia Jewels — Secure Price Calculator (Solitaire + Side Diamonds)
 
 const MAKING_CHARGE_PER_GRAM = 2500;
-const GST_RATE               = 0.03;
 const VALID_PURITIES         = [9, 14, 18];
 
 // Weight-only karat factors. Admin enters 18K weight; code derives other karats.
@@ -216,13 +215,15 @@ export default async function handler(req, res) {
 
     const making   = MAKING_CHARGE_PER_GRAM * goldWt;
     const subtotal = goldPrice + solPrice + sidePrice + making;
-    const gst      = subtotal * GST_RATE;
     const certPrice = certType ? 1000 : 0;
-    const total    = Math.round(subtotal + gst) + certPrice;
+    // GST is no longer added here — Shopify's own tax settings (Settings →
+    // Taxes and duties) apply GST automatically on the draft order based on
+    // the customer's address, so the price sent to Shopify is tax-exclusive.
+    const total    = Math.round(subtotal) + certPrice;
 
     console.log('Price calc:', {
       base18k, goldWt, goldRate: goldRates[purityInt],
-      goldPrice, solPrice, sidePrice, making, gst, total
+      goldPrice, solPrice, sidePrice, making, total
     });
 
     const orderRes = await fetch(
@@ -277,7 +278,6 @@ export default async function handler(req, res) {
         solPrice:      Math.round(solPrice),
         sidePrice:     Math.round(sidePrice),
         making:        Math.round(making),
-        gst:           Math.round(gst),
         total
       }
     });
