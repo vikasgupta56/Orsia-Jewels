@@ -75,14 +75,43 @@ async function getProductMetafields(productId, token) {
 
 async function getDiamondMatrix(diamondType, token) {
   const handle = diamondType === 'lab' ? 'lab_diamond_matrix' : 'natural_diamond_matrix';
+
+  const query = `
+    query GetMatrix($type: String!) {
+      metaobjects(type: $type, first: 250) {
+        edges {
+          node {
+            fields { key value }
+          }
+        }
+      }
+    }
+  `;
+
   const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/metaobjects.json?type=${handle}&limit=250`,
-    { headers: { 'X-Shopify-Access-Token': token } }
+    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+    {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ query, variables: { type: handle } })
+    }
   );
   const data = await res.json();
-  return (data.metaobjects || []).map(obj => {
+
+  if (data.errors) {
+    console.error('Diamond matrix GraphQL errors:', JSON.stringify(data.errors));
+    return [];
+  }
+
+  const edges = data.data?.metaobjects?.edges || [];
+  console.log(`Diamond matrix (${handle}): ${edges.length} rows fetched`);
+
+  return edges.map(({ node }) => {
     const f = {};
-    (obj.fields || []).forEach(field => { f[field.key] = field.value; });
+    (node.fields || []).forEach(field => { f[field.key] = field.value; });
     return {
       quality: f.quality_label || '',
       ctMin:   parseFloat(f.ct_min || 0),
