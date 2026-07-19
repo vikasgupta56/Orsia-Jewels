@@ -8,12 +8,19 @@ const VALID_PURITIES         = [9, 14, 18];
 // Rates are NOT derived here — they come directly from the gold-rates proxy.
 const KARAT_WEIGHT_FACTOR = { 18: 0.79, 14: 0.62, 9: 0.40 };
 
+// Matches the front-end's r2() exactly — floors to 2 decimals, NOT round/toFixed.
+// Keeping this identical on both sides is required so checkout price always
+// matches what the customer saw on the PDP.
+function r2(n) {
+  return Math.floor(parseFloat(n) * 100) / 100;
+}
+
 // base18k = admin-entered 18K weight for this CT option (from product metafield)
 // Derives 24K first (÷ 0.79), then scales to the selected karat
 function getGoldWeight(base18k, purityKt) {
-  const base24k  = base18k / KARAT_WEIGHT_FACTOR[18];       // ÷ 0.79 → 24K
+  const base24k  = r2(base18k) / KARAT_WEIGHT_FACTOR[18];       // ÷ 0.79 → 24K
   const factor   = KARAT_WEIGHT_FACTOR[purityKt] || KARAT_WEIGHT_FACTOR[18];
-  return +(base24k * factor).toFixed(3);
+  return r2(base24k * factor);
 }
 
 async function getAccessToken() {
@@ -48,7 +55,7 @@ async function getGoldRates() {
     throw new Error('Invalid rates from proxy');
   } catch(err) {
     console.warn('Gold rate proxy failed:', err.message);
-    return { 18: 11320, 14: 8804, 9: 5660 };
+    return { 18: 11320, 14: 8884, 9: 5732 };
   }
 }
 
@@ -87,10 +94,14 @@ async function getDiamondMatrix(diamondType, token) {
 
 function calcDiamondGroupPrice(matrix, quality, totalWt, count) {
   if (!totalWt) return 0;
-  const perCt = count > 0 ? totalWt / count : totalWt;
-  const row = matrix.find(r =>
-    r.quality === quality && perCt >= r.ctMin && perCt <= r.ctMax
-  );
+  // Trim per-stone CT to 2dp before matrix lookup — must match front-end exactly,
+  // otherwise a weight near a bucket boundary can select a different price row.
+  const perCt = r2(count > 0 ? totalWt / count : totalWt);
+  const row = matrix.find(r => {
+    const ctMinR = r2(r.ctMin);
+    const ctMaxR = r2(r.ctMax);
+    return r.quality === quality && perCt >= ctMinR && perCt <= ctMaxR;
+  });
   if (!row) return 0;
   return row.price * totalWt;
 }
