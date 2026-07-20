@@ -226,6 +226,13 @@ export default async function handler(req, res) {
       goldPrice, solPrice, sidePrice, making, total
     });
 
+    // ── Friendly display values for order properties ───────────────────────
+    // metalLabel arrives as the full label (e.g. "18K Yellow Gold") — pull
+    // just the color word out of it for the "Metal Color" property.
+    const colorMatch  = (metalLabel || '').match(/Yellow|White|Rose/i);
+    const colorName   = colorMatch ? colorMatch[0] : 'Yellow';
+    const diamondTypeLabel = diamondType === 'lab' ? 'Lab Grown Diamond' : 'Natural Diamond';
+
     const orderRes = await fetch(
       `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/draft_orders.json`,
       {
@@ -240,20 +247,19 @@ export default async function handler(req, res) {
               requires_shipping: true,
               properties: [
                 { name: 'Gold Purity',         value: purityInt + 'kt'              },
-                { name: 'Metal Color',         value: metalLabel || (purityInt + 'kt') },
-                { name: 'Gold Weight (18K input)', value: base18k.toFixed(3) + 'g'     },
-                { name: 'Gold Weight (actual)',    value: goldWt.toFixed(3) + 'g'      },
-                { name: 'Diamond Type',        value: diamondType                   },
+                { name: 'Metal Color',         value: colorName                     },
+                { name: 'Gold Weight',         value: goldWt.toFixed(3) + 'g'      },
+                { name: 'Diamond Type',        value: diamondTypeLabel              },
                 { name: 'Diamond Quality',     value: quality                       },
                 { name: 'Total CT',            value: totalCt + 'ct'               },
                 { name: 'Solitaire Count',     value: solCount + ' pcs'            },
                 { name: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
                 { name: 'Side Diamond Count',  value: sideCount + ' pcs'           },
                 { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
-                { name: 'Diamond Shape',       value: shape || 'Not specified'      },
                 { name: 'Ring Size',           value: ringSize || 'Not specified'   },
-                ...(certType     ? [{ name: 'Certificate',    value: certType      }] : []),
-                ...(engravingText ? [{ name: 'Engraving Text', value: engravingText }] : [])
+                ...(shape         ? [{ name: 'Diamond Shape',   value: shape         }] : []),
+                ...(certType      ? [{ name: 'Certificate',     value: certType      }] : []),
+                ...(engravingText ? [{ name: 'Engraving Text',  value: engravingText }] : [])
               ]
             }],
             note: `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`
