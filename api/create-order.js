@@ -41,9 +41,8 @@ async function getAccessToken() {
 }
 
 // ── Fetch the variant matching the selected shape ─────────────────────────
-// Returns the full variant object (id + price) — used so the draft order's
-// line item can be linked to a real variant (needed for the product image
-// to show at checkout) while still overriding price via applied_discount.
+// Used only so the draft order's line item can reference a real variant
+// (needed for the product image to show at checkout).
 async function getVariantForShape(productId, token, shape) {
   const res = await fetch(
     `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/products/${productId}.json`,
@@ -158,6 +157,73 @@ function calcDiamondGroupPrice(matrix, quality, totalWt, count) {
   return row.price * totalWt;
 }
 
+// ── Create the draft order via GraphQL ─────────────────────────────────────
+// The REST draft_orders API treats "price" as READ-ONLY for line items that
+// reference a variant_id (it always pulls the variant's own price), which is
+// why the default product price was showing up. The GraphQL API's
+// DraftOrderLineItemInput.originalUnitPrice field lets us set an exact custom
+// price on a variant-linked line item directly — no applied_discount needed,
+// so no "Discount" line shows at checkout, and the price matches exactly.
+async function createDraftOrder(token, { variantId, productTitle, total, requiresShipping, properties, note }) {
+  const mutation = `
+    mutation CreateDraftOrder($input: DraftOrderInput!) {
+      draftOrderCreate(input: $input) {
+        draftOrder {
+          id
+          invoiceUrl
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const customAttributes = properties.map(p => ({ key: p.name, value: p.value }));
+
+  const lineItem = variantId
+    ? {
+        variantId: `gid://shopify/ProductVariant/${variantId}`,
+        quantity: 1,
+        originalUnitPrice: total.toString(),
+        requiresShipping,
+        customAttributes
+      }
+    : {
+        title: productTitle,
+        quantity: 1,
+        originalUnitPrice: total.toString(),
+        requiresShipping,
+        customAttributes
+      };
+
+  const res = await fetch(
+    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+    {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: mutation,
+        variables: { input: { lineItems: [lineItem], note } }
+      })
+    }
+  );
+  const data = await res.json();
+
+  if (data.errors) {
+    throw new Error('Draft order GraphQL errors: ' + JSON.stringify(data.errors));
+  }
+  const userErrors = data.data?.draftOrderCreate?.userErrors || [];
+  if (userErrors.length) {
+    throw new Error('Draft order user errors: ' + JSON.stringify(userErrors));
+  }
+  return data.data?.draftOrderCreate?.draftOrder || null;
+}
+
 export default async function handler(req, res) {
 
   const rawDomain    = (process.env.SHOPIFY_STORE_DOMAIN || '').replace(/^https?:\/\//, '');
@@ -258,80 +324,41 @@ export default async function handler(req, res) {
     const diamondTypeLabel = diamondType === 'lab' ? 'Lab Grown Diamond' : 'Natural Diamond';
 
     // ── Real variant so checkout shows the product image ───────────────────
-    // Shopify ignores a custom "price" on a line item that has a variant_id —
-    // it always uses the variant's own price. To keep OUR calculated total,
-    // we attach an applied_discount that brings the variant's price down to
-    // our total. Discounts can only reduce price, never raise it — so if the
-    // variant's base price is somehow lower than our calculated total, we
-    // fall back to a plain custom line item (correct price, no image) rather
-    // than ever charging the customer less than the real total.
-    const variant       = await getVariantForShape(productId, token, shape);
-    const variantId      = variant?.id || null;
-    const variantPrice   = variant ? parseFloat(variant.price) : null;
-    const canDiscountToTarget = variantId && variantPrice != null && variantPrice >= total;
+    const variant   = await getVariantForShape(productId, token, shape);
+    const variantId = variant?.id || null;
 
-    const lineItemBase = canDiscountToTarget
-      ? {
-          variant_id: variantId,
-          applied_discount: {
-            description: 'Configurator price',
-            value_type:  'fixed_amount',
-            value:       (variantPrice - total).toFixed(2),
-            amount:      (variantPrice - total).toFixed(2)
-          }
-        }
-      : { title: productTitle };
+    const properties = [
+      { name: 'Gold Purity',         value: purityInt + 'kt'              },
+      { name: 'Metal Color',         value: colorName                     },
+      { name: 'Gold Weight',         value: goldWt.toFixed(3) + 'g'      },
+      { name: 'Diamond Type',        value: diamondTypeLabel              },
+      { name: 'Diamond Quality',     value: quality                       },
+      { name: 'Total CT',            value: totalCt + 'ct'               },
+      { name: 'Solitaire Count',     value: solCount + ' pcs'            },
+      { name: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
+      { name: 'Side Diamond Count',  value: sideCount + ' pcs'           },
+      { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
+      { name: 'Ring Size',           value: ringSize || 'Not specified'   },
+      ...(shape         ? [{ name: 'Diamond Shape',   value: shape         }] : []),
+      ...(certType      ? [{ name: 'Certificate',     value: certType      }] : []),
+      ...(engravingText ? [{ name: 'Engraving Text',  value: engravingText }] : [])
+    ];
 
-    if (variantId && !canDiscountToTarget) {
-      console.warn(
-        `Orsia: variant base price (₹${variantPrice}) is lower than calculated total (₹${total}) — ` +
-        `falling back to custom line item (no image) to avoid undercharging. Consider raising the ` +
-        `product's base price in Shopify so it always covers the max configurator total.`
-      );
-    }
+    const draftOrder = await createDraftOrder(token, {
+      variantId,
+      productTitle,
+      total,
+      requiresShipping: true,
+      properties,
+      note: `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`
+    });
 
-    const orderRes = await fetch(
-      `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/draft_orders.json`,
-      {
-        method: 'POST',
-        headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          draft_order: {
-            line_items: [{
-              ...lineItemBase,
-              price:    total.toString(),
-              quantity: 1,
-              requires_shipping: true,
-              properties: [
-                { name: 'Gold Purity',         value: purityInt + 'kt'              },
-                { name: 'Metal Color',         value: colorName                     },
-                { name: 'Gold Weight',         value: goldWt.toFixed(3) + 'g'      },
-                { name: 'Diamond Type',        value: diamondTypeLabel              },
-                { name: 'Diamond Quality',     value: quality                       },
-                { name: 'Total CT',            value: totalCt + 'ct'               },
-                { name: 'Solitaire Count',     value: solCount + ' pcs'            },
-                { name: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
-                { name: 'Side Diamond Count',  value: sideCount + ' pcs'           },
-                { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
-                { name: 'Ring Size',           value: ringSize || 'Not specified'   },
-                ...(shape         ? [{ name: 'Diamond Shape',   value: shape         }] : []),
-                ...(certType      ? [{ name: 'Certificate',     value: certType      }] : []),
-                ...(engravingText ? [{ name: 'Engraving Text',  value: engravingText }] : [])
-              ]
-            }],
-            note: `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`
-          }
-        })
-      }
-    );
-    const orderData = await orderRes.json();
-
-    if (!orderData.draft_order) {
-      return res.status(500).json({ error: 'Failed to create order', details: orderData });
+    if (!draftOrder) {
+      return res.status(500).json({ error: 'Failed to create order' });
     }
 
     return res.status(200).json({
-      checkoutUrl:     orderData.draft_order.invoice_url,
+      checkoutUrl:     draftOrder.invoiceUrl,
       calculatedPrice: total,
       breakdown: {
         goldWeight18k:   base18k,
