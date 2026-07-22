@@ -2,6 +2,8 @@
 
 const MAKING_CHARGE_PER_GRAM = 2500;
 const VALID_PURITIES         = [9, 14, 18];
+const FREE_SHIPPING_THRESHOLD = 75000;
+const STANDARD_SHIPPING_PRICE = 200;
 
 // Weight-only karat factors. Admin enters 18K weight; code derives other karats.
 // Rates are NOT derived here — they come directly from the gold-rates proxy.
@@ -70,6 +72,29 @@ async function getProductMetafields(productId, token) {
     fields[`${m.namespace}.${m.key}`] = m.value;
   });
   return fields;
+}
+
+// ── Fetch product variants and pick the one matching the selected shape ──────
+// Used so the draft order's line item is linked to a real variant (needed for
+// the product image to show up at checkout) instead of a custom line item.
+async function getVariantId(productId, token, shape) {
+  const res = await fetch(
+    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/products/${productId}.json`,
+    { headers: { 'X-Shopify-Access-Token': token } }
+  );
+  const data = await res.json();
+  const variants = data.product?.variants || [];
+  if (!variants.length) return null;
+
+  if (shape) {
+    const match = variants.find(v =>
+      (v.option1 || '').toLowerCase() === shape.toLowerCase() ||
+      (v.option2 || '').toLowerCase() === shape.toLowerCase() ||
+      (v.option3 || '').toLowerCase() === shape.toLowerCase()
+    );
+    if (match) return match.id;
+  }
+  return variants[0].id; // fallback
 }
 
 async function getDiamondMatrix(diamondType, token) {
@@ -221,9 +246,12 @@ export default async function handler(req, res) {
     // the customer's address, so the price sent to Shopify is tax-exclusive.
     const total    = Math.round(subtotal) + certPrice;
 
+    // ── Shipping: free above ₹75,000 product value, else flat ₹200 ─────────
+    const shippingPrice = total > FREE_SHIPPING_THRESHOLD ? 0 : STANDARD_SHIPPING_PRICE;
+
     console.log('Price calc:', {
       base18k, goldWt, goldRate: goldRates[purityInt],
-      goldPrice, solPrice, sidePrice, making, total
+      goldPrice, solPrice, sidePrice, making, certPrice, total, shippingPrice
     });
 
     // ── Friendly display values for order properties ───────────────────────
@@ -233,6 +261,9 @@ export default async function handler(req, res) {
     const colorName   = colorMatch ? colorMatch[0] : 'Yellow';
     const diamondTypeLabel = diamondType === 'lab' ? 'Lab Grown Diamond' : 'Natural Diamond';
 
+    // ── Real variant so checkout shows the product image ───────────────────
+    const variantId = await getVariantId(productId, token, shape);
+
     const orderRes = await fetch(
       `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/draft_orders.json`,
       {
@@ -241,7 +272,7 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           draft_order: {
             line_items: [{
-              title:    productTitle,
+              ...(variantId ? { variant_id: variantId } : { title: productTitle }),
               price:    total.toString(),
               quantity: 1,
               requires_shipping: true,
@@ -259,9 +290,14 @@ export default async function handler(req, res) {
                 { name: 'Ring Size',           value: ringSize || 'Not specified'   },
                 ...(shape         ? [{ name: 'Diamond Shape',   value: shape         }] : []),
                 ...(certType      ? [{ name: 'Certificate',     value: certType      }] : []),
+                ...(certType      ? [{ name: 'Certificate Price', value: '₹' + certPrice }] : []),
                 ...(engravingText ? [{ name: 'Engraving Text',  value: engravingText }] : [])
               ]
             }],
+            shipping_line: {
+              title: shippingPrice === 0 ? 'Free Shipping' : 'Standard Shipping',
+              price: shippingPrice.toString()
+            },
             note: `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`
           }
         })
@@ -276,6 +312,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       checkoutUrl:     orderData.draft_order.invoice_url,
       calculatedPrice: total,
+      shippingPrice,
       breakdown: {
         goldWeight18k:   base18k,
         goldWeightActual: goldWt,
@@ -284,6 +321,8 @@ export default async function handler(req, res) {
         solPrice:      Math.round(solPrice),
         sidePrice:     Math.round(sidePrice),
         making:        Math.round(making),
+        certPrice,
+        shippingPrice,
         total
       }
     });
