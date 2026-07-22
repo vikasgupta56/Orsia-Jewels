@@ -40,29 +40,6 @@ async function getAccessToken() {
   return data.access_token;
 }
 
-// ── Fetch product variants and pick the one matching the selected shape ──────
-// Used so the draft order's line item is linked to a real variant (needed for
-// the product image to show up at checkout) instead of a custom line item.
-async function getVariantId(productId, token, shape) {
-  const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/products/${productId}.json`,
-    { headers: { 'X-Shopify-Access-Token': token } }
-  );
-  const data = await res.json();
-  const variants = data.product?.variants || [];
-  if (!variants.length) return null;
-
-  if (shape) {
-    const match = variants.find(v =>
-      (v.option1 || '').toLowerCase() === shape.toLowerCase() ||
-      (v.option2 || '').toLowerCase() === shape.toLowerCase() ||
-      (v.option3 || '').toLowerCase() === shape.toLowerCase()
-    );
-    if (match) return match.id;
-  }
-  return variants[0].id; // fallback
-}
-
 // ── Live gold rate fetch — returns per-karat rates directly from proxy ────────
 async function getGoldRates() {
   try {
@@ -256,9 +233,6 @@ export default async function handler(req, res) {
     const colorName   = colorMatch ? colorMatch[0] : 'Yellow';
     const diamondTypeLabel = diamondType === 'lab' ? 'Lab Grown Diamond' : 'Natural Diamond';
 
-    // ── Real variant so checkout shows the product image ───────────────────
-    const variantId = await getVariantId(productId, token, shape);
-
     const orderRes = await fetch(
       `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/draft_orders.json`,
       {
@@ -267,7 +241,7 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           draft_order: {
             line_items: [{
-              ...(variantId ? { variant_id: variantId } : { title: productTitle }),
+              title:    productTitle,
               price:    total.toString(),
               quantity: 1,
               requires_shipping: true,
