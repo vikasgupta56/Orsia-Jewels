@@ -40,6 +40,30 @@ async function getAccessToken() {
   return data.access_token;
 }
 
+// ── Fetch the variant matching the selected shape ─────────────────────────
+// Returns the full variant object (id + price) — used so the draft order's
+// line item can be linked to a real variant (needed for the product image
+// to show at checkout) while still overriding price via applied_discount.
+async function getVariantForShape(productId, token, shape) {
+  const res = await fetch(
+    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/products/${productId}.json`,
+    { headers: { 'X-Shopify-Access-Token': token } }
+  );
+  const data = await res.json();
+  const variants = data.product?.variants || [];
+  if (!variants.length) return null;
+
+  if (shape) {
+    const match = variants.find(v =>
+      (v.option1 || '').toLowerCase() === shape.toLowerCase() ||
+      (v.option2 || '').toLowerCase() === shape.toLowerCase() ||
+      (v.option3 || '').toLowerCase() === shape.toLowerCase()
+    );
+    if (match) return match;
+  }
+  return variants[0]; // fallback
+}
+
 // ── Live gold rate fetch — returns per-karat rates directly from proxy ────────
 async function getGoldRates() {
   try {
@@ -233,6 +257,39 @@ export default async function handler(req, res) {
     const colorName   = colorMatch ? colorMatch[0] : 'Yellow';
     const diamondTypeLabel = diamondType === 'lab' ? 'Lab Grown Diamond' : 'Natural Diamond';
 
+    // ── Real variant so checkout shows the product image ───────────────────
+    // Shopify ignores a custom "price" on a line item that has a variant_id —
+    // it always uses the variant's own price. To keep OUR calculated total,
+    // we attach an applied_discount that brings the variant's price down to
+    // our total. Discounts can only reduce price, never raise it — so if the
+    // variant's base price is somehow lower than our calculated total, we
+    // fall back to a plain custom line item (correct price, no image) rather
+    // than ever charging the customer less than the real total.
+    const variant       = await getVariantForShape(productId, token, shape);
+    const variantId      = variant?.id || null;
+    const variantPrice   = variant ? parseFloat(variant.price) : null;
+    const canDiscountToTarget = variantId && variantPrice != null && variantPrice >= total;
+
+    const lineItemBase = canDiscountToTarget
+      ? {
+          variant_id: variantId,
+          applied_discount: {
+            description: 'Configurator price',
+            value_type:  'fixed_amount',
+            value:       (variantPrice - total).toFixed(2),
+            amount:      (variantPrice - total).toFixed(2)
+          }
+        }
+      : { title: productTitle };
+
+    if (variantId && !canDiscountToTarget) {
+      console.warn(
+        `Orsia: variant base price (₹${variantPrice}) is lower than calculated total (₹${total}) — ` +
+        `falling back to custom line item (no image) to avoid undercharging. Consider raising the ` +
+        `product's base price in Shopify so it always covers the max configurator total.`
+      );
+    }
+
     const orderRes = await fetch(
       `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/draft_orders.json`,
       {
@@ -241,7 +298,7 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           draft_order: {
             line_items: [{
-              title:    productTitle,
+              ...lineItemBase,
               price:    total.toString(),
               quantity: 1,
               requires_shipping: true,
