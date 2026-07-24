@@ -322,10 +322,11 @@ export default async function handler(req, res) {
       { key: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
       { key: 'Side Diamond Count',  value: sideCount + ' pcs'           },
       { key: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
-      { key: 'Ring Size',           value: ringSize || 'Not specified'   },
+     
       ...(shape         ? [{ key: 'Diamond Shape',   value: shape         }] : []),
       ...(certType      ? [{ key: 'Certificate',     value: certType      }] : []),
-      ...(engravingText ? [{ key: 'Engraving Text',  value: engravingText }] : [])
+      ...(engravingText ? [{ key: 'Engraving Text',  value: engravingText }] : []),
+      ...(ringSize      ? [{ key: 'Ring Size',       value: ringSize      }] : [])
     ];
 
     // ── Attach a real variant so checkout shows the product image ──────────
