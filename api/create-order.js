@@ -1,7 +1,16 @@
 // Orsia Jewels — Secure Price Calculator (Solitaire + Side Diamonds)
+// Rewritten to use the GraphQL Admin API (2025-01+) so we can attach a real
+// variant_id to the draft order line item AND override its price via
+// lineItem.priceOverride — this makes the checkout show the product image
+// while still charging the calculated price. (REST draft_orders.json
+// ignores a custom `price` field when `variant_id` is present, so REST
+// can't do this — confirmed via Shopify's own API changelog + community
+// reports before switching.)
 
 const MAKING_CHARGE_PER_GRAM = 2500;
 const VALID_PURITIES         = [9, 14, 18];
+const CURRENCY_CODE          = process.env.SHOP_CURRENCY_CODE || 'INR';
+const API_VERSION            = '2025-01'; // priceOverride requires 2025-01+
 
 // Weight-only karat factors. Admin enters 18K weight; code derives other karats.
 // Rates are NOT derived here — they come directly from the gold-rates proxy.
@@ -40,7 +49,35 @@ async function getAccessToken() {
   return data.access_token;
 }
 
+// ── Shared GraphQL helper ────────────────────────────────────────────────
+async function shopifyGraphQL(query, variables, token) {
+  const res = await fetch(
+    `https://${process.env.SHOPIFY_STORE}/admin/api/${API_VERSION}/graphql.json`,
+    {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ query, variables })
+    }
+  );
+  const data = await res.json();
+  if (data.errors) {
+    console.error('GraphQL errors:', JSON.stringify(data.errors));
+    throw new Error(data.errors[0]?.message || 'GraphQL request failed');
+  }
+  return data.data;
+}
+
+function toProductGid(productId) {
+  return String(productId).startsWith('gid://')
+    ? productId
+    : `gid://shopify/Product/${productId}`;
+}
+
 // ── Live gold rate fetch — returns per-karat rates directly from proxy ────────
+// (External Vercel proxy — unrelated to Shopify's API, stays REST.)
 async function getGoldRates() {
   try {
     const res = await fetch('https://orsia-jewels.vercel.app/api/gold-rates', {
@@ -58,18 +95,46 @@ async function getGoldRates() {
   }
 }
 
+// ── Product metafields via GraphQL ──────────────────────────────────────
 async function getProductMetafields(productId, token) {
-  const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/products/${productId}/metafields.json`,
-    { headers: { 'X-Shopify-Access-Token': token } }
-  );
-  const data = await res.json();
+  const query = `
+    query GetProductMetafields($id: ID!) {
+      product(id: $id) {
+        metafields(namespace: "custom", first: 50) {
+          edges {
+            node { key value namespace }
+          }
+        }
+      }
+    }
+  `;
+  const data = await shopifyGraphQL(query, { id: toProductGid(productId) }, token);
+  const edges = data.product?.metafields?.edges || [];
   const fields = {};
-  (data.metafields || []).forEach(m => {
-    fields[m.key] = m.value;
-    fields[`${m.namespace}.${m.key}`] = m.value;
+  edges.forEach(({ node }) => {
+    fields[node.key] = node.value;
+    fields[`${node.namespace}.${node.key}`] = node.value;
   });
   return fields;
+}
+
+// ── First variant + its catalog price (for image + price-override decision) ─
+async function getVariantForPrice(productId, token) {
+  const query = `
+    query GetFirstVariant($id: ID!) {
+      product(id: $id) {
+        variants(first: 1) {
+          edges {
+            node { id price }
+          }
+        }
+      }
+    }
+  `;
+  const data = await shopifyGraphQL(query, { id: toProductGid(productId) }, token);
+  const edge = data.product?.variants?.edges?.[0];
+  if (!edge) return null;
+  return { id: edge.node.id, price: parseFloat(edge.node.price) || 0 };
 }
 
 async function getDiamondMatrix(diamondType, token) {
@@ -87,25 +152,8 @@ async function getDiamondMatrix(diamondType, token) {
     }
   `;
 
-  const res = await fetch(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
-    {
-      method: 'POST',
-      headers: {
-        'X-Shopify-Access-Token': token,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ query, variables: { type: handle } })
-    }
-  );
-  const data = await res.json();
-
-  if (data.errors) {
-    console.error('Diamond matrix GraphQL errors:', JSON.stringify(data.errors));
-    return [];
-  }
-
-  const edges = data.data?.metaobjects?.edges || [];
+  const data = await shopifyGraphQL(query, { type: handle }, token);
+  const edges = data.metaobjects?.edges || [];
   console.log(`Diamond matrix (${handle}): ${edges.length} rows fetched`);
 
   return edges.map(({ node }) => {
@@ -132,6 +180,36 @@ function calcDiamondGroupPrice(matrix, quality, totalWt, count) {
   });
   if (!row) return 0;
   return row.price * totalWt;
+}
+
+// ── Draft order creation via GraphQL ────────────────────────────────────
+async function createDraftOrderGraphQL(lineItem, note, token) {
+  const query = `
+    mutation CreateDraftOrder($input: DraftOrderInput!) {
+      draftOrderCreate(input: $input) {
+        draftOrder {
+          id
+          invoiceUrl
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+  const data = await shopifyGraphQL(
+    query,
+    { input: { lineItems: [lineItem], note } },
+    token
+  );
+
+  const result = data.draftOrderCreate;
+  if (result.userErrors && result.userErrors.length > 0) {
+    console.error('draftOrderCreate userErrors:', JSON.stringify(result.userErrors));
+    throw new Error(result.userErrors.map(e => e.message).join('; '));
+  }
+  return result.draftOrder;
 }
 
 export default async function handler(req, res) {
@@ -233,48 +311,63 @@ export default async function handler(req, res) {
     const colorName   = colorMatch ? colorMatch[0] : 'Yellow';
     const diamondTypeLabel = diamondType === 'lab' ? 'Lab Grown Diamond' : 'Natural Diamond';
 
-    const orderRes = await fetch(
-      `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/draft_orders.json`,
-      {
-        method: 'POST',
-        headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          draft_order: {
-            line_items: [{
-              title:    productTitle,
-              price:    total.toString(),
-              quantity: 1,
-              requires_shipping: true,
-              properties: [
-                { name: 'Gold Purity',         value: purityInt + 'kt'              },
-                { name: 'Metal Color',         value: colorName                     },
-                { name: 'Gold Weight',         value: goldWt.toFixed(3) + 'g'      },
-                { name: 'Diamond Type',        value: diamondTypeLabel              },
-                { name: 'Diamond Quality',     value: quality                       },
-                { name: 'Total CT',            value: totalCt + 'ct'               },
-                { name: 'Solitaire Count',     value: solCount + ' pcs'            },
-                { name: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
-                { name: 'Side Diamond Count',  value: sideCount + ' pcs'           },
-                { name: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
-                { name: 'Ring Size',           value: ringSize || 'Not specified'   },
-                ...(shape         ? [{ name: 'Diamond Shape',   value: shape         }] : []),
-                ...(certType      ? [{ name: 'Certificate',     value: certType      }] : []),
-                ...(engravingText ? [{ name: 'Engraving Text',  value: engravingText }] : [])
-              ]
-            }],
-            note: `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`
-          }
-        })
-      }
-    );
-    const orderData = await orderRes.json();
+    const commonAttributes = [
+      { key: 'Gold Purity',         value: purityInt + 'kt'              },
+      { key: 'Metal Color',         value: colorName                     },
+      { key: 'Gold Weight',         value: goldWt.toFixed(3) + 'g'      },
+      { key: 'Diamond Type',        value: diamondTypeLabel              },
+      { key: 'Diamond Quality',     value: quality                       },
+      { key: 'Total CT',            value: totalCt + 'ct'               },
+      { key: 'Solitaire Count',     value: solCount + ' pcs'            },
+      { key: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
+      { key: 'Side Diamond Count',  value: sideCount + ' pcs'           },
+      { key: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
+      { key: 'Ring Size',           value: ringSize || 'Not specified'   },
+      ...(shape         ? [{ key: 'Diamond Shape',   value: shape         }] : []),
+      ...(certType      ? [{ key: 'Certificate',     value: certType      }] : []),
+      ...(engravingText ? [{ key: 'Engraving Text',  value: engravingText }] : [])
+    ];
 
-    if (!orderData.draft_order) {
-      return res.status(500).json({ error: 'Failed to create order', details: orderData });
+    // ── Attach a real variant so checkout shows the product image ──────────
+    // priceOverride works only on GraphQL (2025-01+) with a variantId set —
+    // REST's draft_orders.json ignores a custom `price` when variant_id is
+    // present, which is why this order-creation flow moved to GraphQL.
+    const variant = await getVariantForPrice(productId, token);
+
+    let lineItem;
+    if (variant) {
+      lineItem = {
+        variantId: variant.id,
+        quantity: 1,
+        priceOverride: {
+          amount: total.toFixed(2),
+          currencyCode: CURRENCY_CODE
+        },
+        customAttributes: commonAttributes
+      };
+    } else {
+      // No variant found — fall back to a custom line item (no image).
+      lineItem = {
+        title: productTitle,
+        quantity: 1,
+        originalUnitPriceWithCurrency: {
+          amount: total.toFixed(2),
+          currencyCode: CURRENCY_CODE
+        },
+        requiresShipping: true,
+        customAttributes: commonAttributes
+      };
+    }
+
+    const note = `Orsia — ${purityInt}kt / ${totalCt}ct / ${quality} / ${diamondType}`;
+    const draftOrder = await createDraftOrderGraphQL(lineItem, note, token);
+
+    if (!draftOrder) {
+      return res.status(500).json({ error: 'Failed to create order' });
     }
 
     return res.status(200).json({
-      checkoutUrl:     orderData.draft_order.invoice_url,
+      checkoutUrl:     draftOrder.invoiceUrl,
       calculatedPrice: total,
       breakdown: {
         goldWeight18k:   base18k,
