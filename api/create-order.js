@@ -318,15 +318,14 @@ export default async function handler(req, res) {
       { key: 'Diamond Type',        value: diamondTypeLabel              },
       { key: 'Diamond Quality',     value: quality                       },
       { key: 'Total CT',            value: totalCt + 'ct'               },
-      { key: 'Solitaire Count',     value: solCount + ' pcs'            },
-      { key: 'Solitaire Weight',    value: solWtFloat + 'ct'            },
-      { key: 'Side Diamond Count',  value: sideCount + ' pcs'           },
-      { key: 'Side Diamond Weight', value: sideWtFloat + 'ct'           },
-     
+      ...(solWtFloat  > 0 ? [{ key: 'Solitaire Count',     value: solCount + ' pcs' }] : []),
+      ...(solWtFloat  > 0 ? [{ key: 'Solitaire Weight',    value: solWtFloat + 'ct' }] : []),
+      ...(sideWtFloat > 0 ? [{ key: 'Side Diamond Count',  value: sideCount + ' pcs' }] : []),
+      ...(sideWtFloat > 0 ? [{ key: 'Side Diamond Weight', value: sideWtFloat + 'ct' }] : []),
+      ...(ringSize      ? [{ key: 'Ring Size',       value: ringSize      }] : []),
       ...(shape         ? [{ key: 'Diamond Shape',   value: shape         }] : []),
       ...(certType      ? [{ key: 'Certificate',     value: certType      }] : []),
-      ...(engravingText ? [{ key: 'Engraving Text',  value: engravingText }] : []),
-      ...(ringSize      ? [{ key: 'Ring Size',       value: ringSize      }] : [])
+      ...(engravingText ? [{ key: 'Engraving Text',  value: engravingText }] : [])
     ];
 
     // ── Attach a real variant so checkout shows the product image ──────────
